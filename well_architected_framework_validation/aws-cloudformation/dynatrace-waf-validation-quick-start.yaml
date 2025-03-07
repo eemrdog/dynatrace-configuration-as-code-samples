@@ -1,0 +1,631 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: |
+  The CloudFormation template creates all resources necessary to implement AWS well-architected pillars with an automated
+  workflow in Dynatrace. This showcases the use of the 2 news CloudFormation resources types:
+  - `Dynatrace::Automation::Workflow`
+  - `Dynatrace::Automation::SiteReliabilityGuardian`
+  as well as the integration with the existing resource type `Dynatrace::Environment::ServiceLevelObjective`. The template
+  does not implement all the alerting defined in https://www.dynatrace.com/news/blog/implementing-aws-well-architected-pillars/
+
+Parameters:
+
+  TargetOptimizeCpu:
+    Type: Number
+    Default: 10
+  WarningOptimizeCpu:
+    Type: Number
+    Default: 15
+  TargetCo2:
+    Type: Number
+    Default: 200
+  WarningCo2:
+    Type: Number
+    Default: 150
+
+Resources:
+
+  # Pillar 1: Operational Excellence
+  OperationalExcellenceSrg:
+    Type: Dynatrace::Automation::SiteReliabilityGuardian
+    Properties:
+      Name: Operational Excellence
+      Description: Operational Excellence Guardian
+      Tags:
+        - usecase:sixpillars
+        - template:quickstart
+      Variables:
+        - Name: timeframeMinutes
+          Definition: 15
+        - Name: referenceTimeframeMinutes
+          Definition: 15
+        - Name: buyFinishReferenceCount
+          Definition: 10
+        - Name: sellFinishReferenceCount
+          Definition: 10
+        - Name: buyErrorReferenceCount
+          Definition: 5
+        - Name: sellErrorReferenceCount
+          Definition: 5
+      Objectives:
+        - Name: Bizevent easytrade buy finish count
+          Description: Bizevent type [com.easytrade.buy.finish] count
+          ObjectiveType: DQL
+          ComparisonOperator: GREATER_THAN_OR_EQUAL
+          AutoAdaptiveThresholdEnabled: true
+          Target: 3
+          Warning: 5
+          DqlQuery: |
+            fetch bizevents
+            | filter event.type == "com.easytrade.buy.finish"
+            | fieldsAdd n = 1
+            | summarize sum(n) / $buyFinishReferenceCount / $timeframeMinutes * $referenceTimeframeMinutes
+
+        - Name: Bizevent easytrade buy error count
+          Description: Bizevent type [com.easytrade.buy.error] count
+          ObjectiveType: DQL
+          ComparisonOperator: LESS_THAN_OR_EQUAL
+          AutoAdaptiveThresholdEnabled: true
+          Target: 5
+          Warning: 3
+          DqlQuery: |
+            fetch bizevents
+            | filter event.type == "com.easytrade.buy.error"
+            | fieldsAdd n = 1
+            | summarize sum(n) / $buyErrorReferenceCount / $timeframeMinutes * $referenceTimeframeMinutes
+
+        - Name: Bizevent easytrade sell finish count
+          Description: Bizevent type [com.easytrade.sell.finish] count
+          ObjectiveType: DQL
+          ComparisonOperator: GREATER_THAN_OR_EQUAL
+          AutoAdaptiveThresholdEnabled: true
+          Target: 3
+          Warning: 5
+          DqlQuery: |
+            fetch bizevents
+            | filter event.type == "com.easytrade.sell.finish"
+            | fieldsAdd n = 1
+            | summarize sum(n) / $sellFinishReferenceCount / $timeframeMinutes * $referenceTimeframeMinutes
+
+        - Name: Bizevent easytrade sell error count
+          Description: Bizevent type [com.easytrade.sell.error] count
+          ObjectiveType: DQL
+          ComparisonOperator: LESS_THAN_OR_EQUAL
+          AutoAdaptiveThresholdEnabled: true
+          Target: 5
+          Warning: 3
+          DqlQuery: |
+            fetch bizevents
+            | filter event.type == "com.easytrade.sell.error"
+            | fieldsAdd n = 1
+            | summarize sum(n) / $sellErrorReferenceCount / $timeframeMinutes * $referenceTimeframeMinutes
+
+
+  # Pillar 2: Security
+  SecuritySrg:
+    Type: Dynatrace::Automation::SiteReliabilityGuardian
+    Properties:
+      Name: Security
+      Description: Security Guardian
+      Tags:
+        - usecase:sixpillars
+        - template:quickstart
+      Variables:
+        - Name: application
+          Definition: easytrade
+        - Name: service
+          Definition: offerservice
+        - Name: stage
+          Definition: staging
+        - Name: version
+          Definition: 1.0.0
+      Objectives:
+        - Name: Vulnerability Score
+          Description: Runtime Vulnerability Analysis for a Process Group Instance – Davis Security Assessment Score
+          ObjectiveType: DQL
+          ComparisonOperator: LESS_THAN_OR_EQUAL
+          AutoAdaptiveThresholdEnabled: false
+          Target: 7
+          Warning: 6
+          DqlQuery: |
+            fetch events
+            | filter event.provider=="Dynatrace"
+            | filter event.kind=="SECURITY_EVENT"
+            | filter event.type=="VULNERABILITY_STATE_REPORT_EVENT"
+            | filter event.level=="ENTITY"
+            | fieldsAdd matcher="match"
+            | lookup [
+            fetch events
+            | filter event.provider=="Dynatrace"
+            | filter event.kind=="SECURITY_EVENT"
+            | filter event.type=="VULNERABILITY_STATE_REPORT_EVENT"
+            | filter event.level=="ENTITY"
+            | fields maxTimestamp=timestamp, matcher="match"
+            | limit 1
+            ], sourceField:matcher, lookupField:matcher, fields:{maxTimestamp}
+            | filter timestamp==maxTimestamp
+              | lookup
+                [ fetch dt.entity.process_group 
+                | fieldsAdd tags 
+                | filter(matchesPhrase(tags,"DT_RELEASE_STAGE:$stage"))
+                | filter(matchesPhrase(tags,"DT_RELEASE_PRODUCT:$application"))
+                | filter(matchesPhrase(tags,"app:$service"))
+                | filter(matchesPhrase(tags,"DT_RELEASE_VERSION:$version"))
+                | summarize pg_id = takeFirst(id)
+                ], sourceField:affected_entity.id , lookupField:pg_id 
+              | filter affected_entity.id == toString(lookup.pg_id) 
+            | summarize score=if(isNotNull(takeMax(vulnerability.risk.score)), takeMax(vulnerability.risk.score), else:0)
+
+        - Name: Open vulnerability on process group
+          Description: The total number of currently high-profile vulnerabilities related to a process group.
+          ObjectiveType: DQL
+          ComparisonOperator: LESS_THAN_OR_EQUAL
+          AutoAdaptiveThresholdEnabled: false
+          Target: 2
+          Warning: 1
+          DqlQuery: |
+            fetch events
+            | filter event.provider=="Dynatrace"
+            | filter event.kind=="SECURITY_EVENT"
+            | filter event.type=="VULNERABILITY_STATE_REPORT_EVENT"
+            | filter event.level=="ENTITY"
+            | fieldsAdd matcher="match"
+            | lookup [
+            fetch events
+            | filter event.provider=="Dynatrace"
+            | filter event.kind=="SECURITY_EVENT"
+            | filter event.type=="VULNERABILITY_STATE_REPORT_EVENT"
+            | filter event.level=="ENTITY"
+            | fields maxTimestamp=timestamp, matcher="match"
+            | limit 1
+            ], sourceField:matcher, lookupField:matcher, fields:{maxTimestamp}
+            | filter timestamp==maxTimestamp
+            | filter event.status=="OPEN"
+            | filter in(vulnerability.risk.level,{"CRITICAL","HIGH"})
+            | lookup
+              [ fetch dt.entity.process_group 
+              | fieldsAdd tags 
+              | filter(matchesPhrase(tags,"DT_RELEASE_STAGE:$stage"))
+              | filter(matchesPhrase(tags,"DT_RELEASE_PRODUCT:$application"))
+              | filter(matchesPhrase(tags,"app:$service"))
+              | filter(matchesPhrase(tags,"DT_RELEASE_VERSION:$version"))
+              | summarize pg_id = takeFirst(id)
+              ], sourceField:affected_entity.id , lookupField:pg_id 
+            | filter affected_entity.id == toString(lookup.pg_id) 
+            | summarize val=arraySize(collectDistinct(vulnerability.id))
+            | fields `Filtered high-profile vulnerabilities`=if(isNull(val), 0, else: val)
+
+  # Pillar 3: Reliability
+  ReliabilitySrg:
+    Type: Dynatrace::Automation::SiteReliabilityGuardian
+    Properties:
+      Name: Reliability
+      Description: Reliability Guardian
+      Tags:
+        - usecase:sixpillars
+        - template:quickstart
+      Variables:
+        - Name: application
+          Definition: easytrade
+        - Name: service
+          Definition: offerservice
+        - Name: stage
+          Definition: staging
+        - Name: version
+          Definition: 1.0.0
+      Objectives:
+        - Name: Error rate
+          Description: The rate of requests that fail
+          ObjectiveType: DQL
+          ComparisonOperator: LESS_THAN_OR_EQUAL
+          AutoAdaptiveThresholdEnabled: true
+          # Target: 5
+          # Warning: 2
+          DqlQuery: |
+            timeseries {
+              failure_count = avg(dt.service.request.failure_count),
+              request_count = avg(dt.service.request.count)
+            }, by:{dt.entity.service} 
+            | lookup [
+              fetch dt.entity.service
+              | fieldsAdd tags
+              | filter(matchesPhrase(tags,"DT_RELEASE_STAGE:$stage"))
+              | filter(matchesPhrase(tags,"DT_RELEASE_PRODUCT:$application"))
+              | filter(matchesPhrase(tags,"DT_RELEASE_VERSION:$version"))
+              | filter(matchesPhrase(tags,"app:$service"))
+              | sort lifetime desc
+              | summarize svc_id = takeFirst(id)
+              ],
+              sourceField:dt.entity.service,
+              lookupField:svc_id,
+              prefix:"svc_"
+            | filter isNotNull(svc_svc_id)
+            | fieldsAdd result = 100 * (failure_count[]/request_count[])
+            | summarize failure_rate = avg(arrayAvg(result))
+
+
+  # Pillar 4: Performance Efficiency
+  PerformanceEfficiencySrg:
+    Type: Dynatrace::Automation::SiteReliabilityGuardian
+    Properties:
+      Name: Performance Efficiency
+      Description: Performance Efficiency Guardian
+      Tags:
+        - usecase:sixpillars
+        - template:quickstart
+      Variables:
+        - Name: application
+          Definition: easytrade
+        - Name: service
+          Definition: offerservice
+        - Name: stage
+          Definition: staging
+        - Name: version
+          Definition: 1.0.0
+      Objectives:
+        - Name: Latency
+          Description: The time it takes to service a request is measured by the 95th percentile of a service's response time
+          ObjectiveType: DQL
+          ComparisonOperator: LESS_THAN_OR_EQUAL
+          AutoAdaptiveThresholdEnabled: true
+          # Target: 500
+          # Warning: 400
+          DqlQuery: |
+            timeseries p95 = percentile(dt.service.request.response_time, 95), by:{dt.entity.service}
+            | lookup [
+              fetch dt.entity.service
+              | fieldsAdd tags
+              | filter(matchesPhrase(tags,"DT_RELEASE_STAGE:$stage"))
+              | filter(matchesPhrase(tags,"DT_RELEASE_PRODUCT:$application"))
+              | filter(matchesPhrase(tags,"DT_RELEASE_VERSION:$version"))
+              | filter(matchesPhrase(tags,"app:$service"))
+              | sort lifetime desc
+              | summarize svc_id = takeFirst(id)
+              ],
+              sourceField:dt.entity.service,
+              lookupField:svc_id,
+              prefix:"svc_"
+            | filter isNotNull(svc_svc_id)
+            | fields response_time_95 = (arrayAvg(p95))/1000
+
+        - Name: Traffic
+          Description: The amount of demand for your service is measured by the requests per minute
+          ObjectiveType: DQL
+          ComparisonOperator: GREATER_THAN_OR_EQUAL
+          AutoAdaptiveThresholdEnabled: true
+          # Target: 20
+          # Warning: 30
+          DqlQuery: |
+            timeseries request_count = sum(dt.service.request.count, rate: 1m), by:{dt.entity.service}
+            | lookup [
+              fetch dt.entity.service
+              | fieldsAdd tags
+              | filter(matchesPhrase(tags,"DT_RELEASE_STAGE:$stage"))
+              | filter(matchesPhrase(tags,"DT_RELEASE_PRODUCT:$application"))
+              | filter(matchesPhrase(tags,"DT_RELEASE_VERSION:$version"))
+              | filter(matchesPhrase(tags,"app:$service"))
+              | sort lifetime desc
+              | summarize svc_id = takeFirst(id)
+              ],
+              sourceField:dt.entity.service,
+              lookupField:svc_id,
+              prefix:"svc_"
+            | filter isNotNull(svc_svc_id)
+            | summarize throughput = avg(arrayAvg(request_count))
+
+  # Pillar 5: Cost Optimization
+  CostOptimizationSrg:
+    Type: Dynatrace::Automation::SiteReliabilityGuardian
+    Properties:
+      Name: Cost Optimization
+      Description: Cost Optimization Guardian
+      Tags:
+        - usecase:sixpillars
+        - template:quickstart
+      Variables:
+        - Name: application
+          Definition: easytrade
+        - Name: service
+          Definition: offerservice
+        - Name: stage
+          Definition: staging
+        - Name: version
+          Definition: 1.0.0
+      Objectives:
+        - Name: Optimize container CPU limit
+          Description: Reduce CPU size and cost by checking CPU usage
+          ObjectiveType: DQL
+          ComparisonOperator: GREATER_THAN_OR_EQUAL
+          AutoAdaptiveThresholdEnabled: false
+          Target: !Ref TargetOptimizeCpu
+          Warning: !Ref WarningOptimizeCpu
+          DqlQuery: |
+            timeseries  {cpu_usage = sum(dt.kubernetes.container.cpu_usage), requests_cpu = sum(dt.kubernetes.container.requests_cpu)} 
+            ,by: { dt.entity.cloud_application_instance, k8s.deployment.name, k8s.cluster.name, k8s.namespace.name } , interval: 1m
+            | lookup
+              [   
+                fetch dt.entity.cloud_application_instance
+                | fields id, entity.name, cloudApplicationLabels, currentCondition, contains, entity.type, instance_of, kubernetesClusterName, kubernetesAnnotations
+                , lifetime, limitsCPU, limitsMemory, requestsCPU, requestsMemory, tags, workloadName, workloadType, namespaceName
+                | sort lifetime desc
+                | fieldsFlatten cloudApplicationLabels
+                | filter `cloudApplicationLabels.app.kubernetes.io/part-of` == "$application"
+                | filter cloudApplicationLabels.app == "$service"
+                | filter `cloudApplicationLabels.app.kubernetes.io/version` == "$version"
+                | filter matchesPhrase(namespaceName,"$stage") 
+                | limit 1
+                        
+              ], sourceField:dt.entity.cloud_application_instance , lookupField:id
+            | filter dt.entity.cloud_application_instance == lookup.id
+            | fieldsAdd usage_percent = cpu_usage[] / requests_cpu[] * 100
+            | fields avg = arrayAvg(usage_percent)
+
+        - Name: Optimize container Memory limit
+          Description: Reduce Memory size and cost by checking Memory usage
+          ObjectiveType: DQL
+          ComparisonOperator: GREATER_THAN_OR_EQUAL
+          AutoAdaptiveThresholdEnabled: false
+          Target: 10
+          Warning: 15
+          DqlQuery: |
+            timeseries memory_usage = avg(dt.process.memory.usage),  by:{dt.entity.process_group},
+                filter:{
+                  dt.entity.process_group in [
+                    fetch dt.entity.process_group
+                    | expand runs[dt.entity.service], alias: services
+                    | filter services in [
+                        fetch dt.entity.service
+                        | filter(matchesPhrase(tags,"DT_RELEASE_STAGE:$stage"))
+                        | filter(matchesPhrase(tags,"DT_RELEASE_PRODUCT:$application"))
+                        | filter(matchesPhrase(tags,"DT_RELEASE_VERSION:$version"))
+                        | filter(matchesPhrase(tags,"app:$service"))
+                        | fields id
+                      ]
+                    | fields id
+                  ]
+                }
+              | summarize memory_saturation = avg(arrayAvg(memory_usage))
+
+  # Pillar 6: Sustainability
+  SustainabilitySrg:
+    Type: Dynatrace::Automation::SiteReliabilityGuardian
+    Properties:
+      Name: Sustainability
+      Description: Sustainability Guardian
+      Tags:
+        - usecase:sixpillars
+        - template:quickstart
+      Variables:
+        - Name: application
+          Definition: easytrade
+        - Name: service
+          Definition: offerservice
+        - Name: stage
+          Definition: staging
+        - Name: version
+          Definition: 1.0.0
+      Objectives:
+        - Name: Carbon Index 
+          Description: Distribute Carbon emissions by process group using CPU usage.
+          ObjectiveType: DQL
+          ComparisonOperator: LESS_THAN_OR_EQUAL
+          AutoAdaptiveThresholdEnabled: false
+          Target: !Ref TargetCo2
+          Warning: !Ref WarningCo2
+          DqlQuery: |
+            fetch dt.entity.process_group_instance
+            | fields entity.name,tags, lifetime, dt.entity.host=belongs_to[dt.entity.host],
+              dt.entity.process_group= instance_of[dt.entity.process_group],
+              dt.entity.process_group_instance = id
+            | lookup sourceField:dt.entity.host, lookupField:dt.entity.host, [fetch bizevents
+              | filter event.type=="carbon.measurement"
+              | summarize sum = sum(carbon.emissions), by:{dt.entity.host}], prefix:"carbon."
+            | lookup [timeseries ts=avg(dt.process.cpu.usage),
+              by:{dt.entity.process_group_instance}
+              | fields cpu_sum= arraySum(ts), dt.entity.process_group_instance],sourceField:dt.entity.process_group_instance,
+              lookupField:dt.entity.process_group_instance
+            | fieldsAdd cpu_sum=lookup.cpu_sum
+            | fieldsRemove "lookup*"
+            | fieldsRename carbon_per_host=carbon.sum
+            | lookup [timeseries ts=avg(dt.process.cpu.usage),  by:{dt.entity.process_group_instance}
+              | lookup [fetch dt.entity.process_group_instance], sourceField:dt.entity.process_group_instance, lookupField:id
+              | fields ts, dt.entity.process_group_instance, dt.entity.host = lookup.belongs_to[dt.entity.host]
+              | fieldsAdd cpusum = arraySum(ts)
+              | summarize cpuHostSum = sum(cpusum), by:{dt.entity.host}],
+              sourceField:dt.entity.host, lookupField:dt.entity.host
+            | fieldsAdd carbon_per_process = (cpu_sum/lookup.cpuHostSum) * carbon_per_host
+            | fields dt.entity.process_group, dt.entity.process_group_instance,
+              dt.entity.host, carbon_per_process, tags, lifetime
+            | sort carbon_per_process desc
+              | filter(matchesPhrase(tags,"DT_RELEASE_STAGE:$stage"))
+              | filter(matchesPhrase(tags,"DT_RELEASE_PRODUCT:$application"))
+              | filter(matchesPhrase(tags,"app:$service"))
+              | filter(matchesPhrase(tags,"DT_RELEASE_VERSION:$version"))
+              | sort lifetime desc
+              | limit 1
+              | fields carbon_per_process
+
+
+  # Combine the above guardians into a single automation workflow
+  Workflow:
+    Type: Dynatrace::Automation::Workflow
+    Properties:
+      Title: Quickstart - Well-architected Six Pillars Evaluation
+      Description: Well-architected Six Pillars Workflow with Guardians by Cloudformation
+      IsPrivate: 'false'
+      Trigger:
+        EventTrigger:
+          IsActive: true
+          TriggerConfiguration:
+            Type: event
+            Value:
+              EventType: bizevents
+              Query: |
+                event.type == "guardian.validation.triggered"
+                AND application == "easytrade"
+                AND stage   == "staging"
+
+      Tasks:
+
+        - Name: operationalExcellence
+          Description: Validate WAF pillar 1 - Operational Excellence
+          Action: dynatrace.site.reliability.guardian:validate-guardian-action
+          Position:
+            X: 0
+            'Y': 1
+          Input:
+            objectId: !GetAtt OperationalExcellenceSrg.ObjectId
+            executionId: '{{ execution().id }}'
+            expressionTo: '{{ event()[''timeframe.to''] }}'
+            expressionFrom: '{{ event()[''timeframe.from''] }}'
+            timeframeInputType: expression
+            timeframeSelector:
+              from_: now-60m
+              to: now
+            variables:
+              - name: application
+                definition: '{{ event()[''application''] }}'
+              - name: service
+                definition: '{{ event()[''service''] }}'
+              - name: stage
+                definition: '{{ event()[''stage''] }}'
+
+        - Name: security
+          Description: Validate WAF pillar 2 - Security
+          Action: dynatrace.site.reliability.guardian:validate-guardian-action
+          Position:
+            X: 0
+            'Y': 2
+          Input:
+            objectId: !GetAtt SecuritySrg.ObjectId
+            executionId: '{{ execution().id }}'
+            expressionTo: '{{ event()[''timeframe.to''] }}'
+            expressionFrom: '{{ event()[''timeframe.from''] }}'
+            timeframeInputType: expression
+            timeframeSelector:
+              from_: now-60m
+              to: now
+            variables:
+              - name: application
+                definition: '{{ event()[''application''] }}'
+              - name: service
+                definition: '{{ event()[''service''] }}'
+              - name: stage
+                definition: '{{ event()[''stage''] }}'
+
+        - Name: reliability
+          Description: Validate WAF pillar 3 - Reliability
+          Action: dynatrace.site.reliability.guardian:validate-guardian-action
+          Position:
+            X: 0
+            'Y': 3
+          Input:
+            objectId: !GetAtt ReliabilitySrg.ObjectId
+            executionId: '{{ execution().id }}'
+            expressionTo: '{{ event()[''timeframe.to''] }}'
+            expressionFrom: '{{ event()[''timeframe.from''] }}'
+            timeframeInputType: expression
+            timeframeSelector:
+              from_: now-10m
+              to: now
+            variables:
+              - name: application
+                definition: '{{ event()[''application''] }}'
+              - name: service
+                definition: '{{ event()[''service''] }}'
+              - name: stage
+                definition: '{{ event()[''stage''] }}'
+
+        - Name: performanceEfficiency
+          Description: Validate WAF pillar 4 - Performance Efficiency
+          Action: dynatrace.site.reliability.guardian:validate-guardian-action
+          Position:
+            X: 0
+            'Y': 4
+          Input:
+            objectId: !GetAtt PerformanceEfficiencySrg.ObjectId
+            executionId: '{{ execution().id }}'
+            expressionTo: '{{ event()[''timeframe.to''] }}'
+            expressionFrom: '{{ event()[''timeframe.from''] }}'
+            timeframeInputType: expression
+            timeframeSelector:
+              from_: now-10m
+              to: now
+            variables:
+              - name: application
+                definition: '{{ event()[''application''] }}'
+              - name: service
+                definition: '{{ event()[''service''] }}'
+              - name: stage
+                definition: '{{ event()[''stage''] }}'
+
+        - Name: costOptimization
+          Description: Validate WAF pillar 5 - Cost Optimization
+          Action: dynatrace.site.reliability.guardian:validate-guardian-action
+          Position:
+            X: 0
+            'Y': 5
+          Input:
+            objectId: !GetAtt CostOptimizationSrg.ObjectId
+            executionId: '{{ execution().id }}'
+            expressionTo: '{{ event()[''timeframe.to''] }}'
+            expressionFrom: '{{ event()[''timeframe.from''] }}'
+            timeframeInputType: expression
+            timeframeSelector:
+              from_: now-10m
+              to: now
+            variables:
+              - name: application
+                definition: '{{ event()[''application''] }}'
+              - name: service
+                definition: '{{ event()[''service''] }}'
+              - name: stage
+                definition: '{{ event()[''stage''] }}'
+
+        - Name: sustainability
+          Description: Validate WAF pillar 6 - Sustainability
+          Action: dynatrace.site.reliability.guardian:validate-guardian-action
+          Position:
+            X: 0
+            'Y': 6
+          Input:
+            objectId: !GetAtt SustainabilitySrg.ObjectId
+            executionId: '{{ execution().id }}'
+            expressionTo: '{{ event()[''timeframe.to''] }}'
+            expressionFrom: '{{ event()[''timeframe.from''] }}'
+            timeframeInputType: expression
+            timeframeSelector:
+              from_: now-40m
+              to: now
+            variables:
+              - name: application
+                definition: '{{ event()[''application''] }}'
+              - name: service
+                definition: '{{ event()[''service''] }}'
+              - name: stage
+                definition: '{{ event()[''stage''] }}'
+
+        - Name: validation_results
+          Description: Validation results of Six WAF pillars
+          Action: dynatrace.automations:run-javascript
+          Position:
+            X: 0
+            'Y': 7
+          Input:
+            script: |
+              // optional import of sdk modules\n
+              import { execution } from '@dynatrace-sdk/automation-utils';\n\nexport default async function ({ executionId }) {
+              \n\n  const ex = await execution(executionId);
+              \n\n\n  const performance = await ex.result(\"performance\")\n  
+              const security = await ex.result(\"security\")\n  
+              const reliability = await ex.result(\"reliability\")\n  
+              const operational = await ex.result(\"operationalExcellence\")\n  
+              const sustainability = await ex.result(\"sustainability\")\n  
+              const cost = await ex.result(\"costOptimization\")\n\n\n  
+              console.log(\"Performance Efficiency:\" + JSON.stringify(performance.validation_status, null, 2));\n  
+              console.log(\"Security:\" + JSON.stringify(security.validation_status, null, 2));  \n  
+              console.log(\"Reliability:\" + JSON.stringify(reliability.validation_status, null, 2));\n  
+              console.log(\"Operational Excellence:\" + JSON.stringify(operational.validation_status, null, 2));\n  
+              console.log(\"Sustainability:\" + JSON.stringify(sustainability.validation_status, null, 2));\n  
+              console.log(\"Cost Optimization:\" + JSON.stringify(cost.validation_status, null, 2));\n\n  \n  
+              return { triggeredBy: ex.trigger };\n}
